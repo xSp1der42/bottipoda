@@ -12,13 +12,13 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
-# ЕСЛИ СНОВА БУДЕТ ОШИБКА UNAUTHORIZED — СГЕНЕРИРУЙ НОВЫЙ ТОКЕН В BOTFATHER И ВСТАВЬ СЮДА:
-BOT_TOKEN = "8099587334:AAHPFtG9QEGxtvdD7W7S6n8Ntc2ng7v1Meo"
+# ВСТАВЬ СЮДА СВОЙ НОВЫЙ ТОКЕН ИЗ @BotFather
+BOT_TOKEN = "ТВОЙ_НОВЫЙ_ТОКЕН_СЮДА"
 ADMIN_ID = 5958249983
 DB_NAME = "business_messages.db"
 # =============================================
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 router = Router()
 
 async def init_db():
@@ -130,7 +130,7 @@ async def on_edited_business_message(message: Message, bot: Bot):
 
 @router.deleted_business_messages()
 async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bot):
-    """Ловим удаление бизнес-сообщений и скидываем в ЛС бота"""
+    """Ловим удаление бизнес-сообний и скидываем в ЛС бота"""
     logging.info(f"Поймано УДАЛЕНИЕ бизнес-сообщения. ID сообщений: {deleted.message_ids}")
     
     chat_id = deleted.chat.id
@@ -165,7 +165,7 @@ async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bo
         await db.commit()
 
 # =====================================================================
-# 3. ЗАГЛУШКА ДЛЯ СЕРВЕРА И ЗАПУСК
+# 3. ЗАГЛУШКА ДЛЯ СЕРВЕРА И ЗАПУСК С КОРРЕКТНЫМ ВЫХОДОМ
 # =====================================================================
 
 async def handle_ping(request):
@@ -179,7 +179,7 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
     
-    # Запускаем фиктивный веб-сервер для Render в фоновом режиме
+    # Настройка веб-сервера для Render
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
@@ -188,25 +188,33 @@ async def main():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     
-    # Запускаем веб-сервер не блокируя бота
-    asyncio.create_task(site.start())
+    # Запускаем веб-сервер
+    await site.start()
     logging.info(f"Веб-заглушка успешно запущена на порту {port}")
 
+    # Удаляем вебхуки, чтобы поллинг работал
     logging.info("Удаляем старые вебхуки...")
     await bot.delete_webhook(drop_pending_updates=True) 
     
     logging.info("Запускаем поллинг бота...")
-    # ВАЖНО: Жестко указываем Телеграму присылать ВСЕ типы обновлений
-    await dp.start_polling(bot, allowed_updates=[
-        "message", 
-        "business_connection", 
-        "business_message", 
-        "edited_business_message", 
-        "deleted_business_messages"
-    ])
+    try:
+        # ВАЖНО: Жестко указываем Телеграму присылать ВСЕ типы обновлений
+        await dp.start_polling(bot, allowed_updates=[
+            "message", 
+            "business_connection", 
+            "business_message", 
+            "edited_business_message", 
+            "deleted_business_messages"
+        ])
+    finally:
+        # ПРАВИЛЬНОЕ ЗАВЕРШЕНИЕ РАБОТЫ (ИСПРАВЛЯЕТ ОШИБКУ TelegramConflictError)
+        logging.info("Остановка бота... Очистка соединений...")
+        await bot.session.close()
+        await runner.cleanup()
+        logging.info("Все соединения закрыты.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nБот остановлен пользователем.")
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Бот принудительно остановлен.")
