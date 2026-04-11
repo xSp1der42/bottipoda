@@ -12,6 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
+# ЕСЛИ СНОВА БУДЕТ ОШИБКА UNAUTHORIZED — СГЕНЕРИРУЙ НОВЫЙ ТОКЕН В BOTFATHER И ВСТАВЬ СЮДА:
 BOT_TOKEN = "8099587334:AAHPFtG9QEGxtvdD7W7S6n8Ntc2ng7v1Meo"
 ADMIN_ID = 5958249983
 DB_NAME = "business_messages.db"
