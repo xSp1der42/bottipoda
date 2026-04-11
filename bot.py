@@ -5,14 +5,14 @@ from datetime import datetime
 import aiosqlite
 from aiohttp import web
 
-from aiogram import Bot, Dispatcher, Router, F
+from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message, BusinessMessagesDeleted
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "8099587334:AAEiprR86Iavdkx-6CGuPLKh0yP1WMr_Jp0"
+BOT_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"
 ADMIN_ID = 5958249983 # Ваш ID
 DB_NAME = "business_messages.db"
 # =============================================
@@ -43,15 +43,14 @@ async def init_db():
 async def cmd_start(message: Message):
     """Реакция на кнопку /start внутри самого бота"""
     if message.from_user.id != ADMIN_ID:
-        await message.answer("Извините, я работаю только со своим создателем.")
         return
         
     await message.answer(
-        "👋 <b>Привет, босс!</b>\n\n"
-        "Я успешно запущен и слушаю твои личные переписки через Business API.\n"
-        "Теперь я буду скидывать сюда все удаленные и измененные сообщения.\n\n"
+        "👋 <b>Привет!</b>\n\n"
+        "Теперь у нас с тобой есть открытый диалог. Я успешно смогу присылать "
+        "тебе удаленные и измененные сообщения из Business-чатов!\n\n"
         "Команды:\n"
-        "📊 /stats — посмотреть, сколько сообщений сохранено в базе"
+        "📊 /stats — статистика сохраненных сообщений"
     )
 
 @router.message(Command("stats"))
@@ -67,13 +66,14 @@ async def cmd_stats(message: Message):
 
     await message.answer(f"🗄 <b>Статистика базы данных:</b>\nСейчас в памяти сохранено <b>{count}</b> сообщений.")
 
+
 # =====================================================================
-# 2. ОБРАБОТЧИКИ БИЗНЕС-СООБЩЕНИЙ (КОГДА ВАМ ПИШУТ ВАШИ КОНТАКТЫ)
+# 2. ОБРАБОТЧИКИ БИЗНЕС-СООБЩЕНИЙ
 # =====================================================================
 
 @router.business_message()
 async def on_new_business_message(message: Message):
-    """Ловим новые бизнес-сообщения и ТИХО сохраняем в БД"""
+    """Ловим новые бизнес-сообщения и сохраняем в БД"""
     text = message.text or message.caption or "[Медиафайл без текста / Стикер]"
     sender_name = message.from_user.full_name if message.from_user else "Неизвестный"
     
@@ -111,12 +111,14 @@ async def on_edited_business_message(message: Message, bot: Bot):
         f"✅ <b>Стало:</b>\n{new_text}"
     )
     
+    # Безопасная отправка (чтобы бот не падал, если вы не нажали /start)
     try:
         await bot.send_message(ADMIN_ID, alert)
     except Exception as e:
-        logging.error(f"Не удалось отправить! Скорее всего вы не нажали /start в боте. Ошибка: {e}")
+        logging.error(f"Не удалось отправить уведомление об изменении. Ошибка: {e}. НАЖМИТЕ /start В БОТЕ!")
 
-@router.business_messages_deleted()
+# ИСПРАВЛЕНО: Вернул правильный декоратор deleted_business_messages
+@router.deleted_business_messages()
 async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bot):
     """Ловим удаление бизнес-сообщений и скидываем в ЛС бота"""
     chat_id = deleted.chat.id
@@ -139,10 +141,12 @@ async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bo
                     f"📝 <b>Текст:</b> {text}\n"
                     f"🕐 <b>Было написано:</b> {dt_str}"
                 )
+                
+                # Безопасная отправка (чтобы бот не падал, если вы не нажали /start)
                 try:
                     await bot.send_message(ADMIN_ID, alert)
                 except Exception as e:
-                    logging.error(f"Не удалось отправить! Нажмите /start в боте. Ошибка: {e}")
+                    logging.error(f"Не удалось отправить уведомление об удалении. Ошибка: {e}. НАЖМИТЕ /start В БОТЕ!")
 
                 await db.execute("DELETE FROM messages WHERE chat_id = ? AND message_id = ?", (chat_id, msg_id))
         
@@ -162,7 +166,7 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
     
-    # Запускаем фиктивный веб-сервер
+    # Запускаем фиктивный веб-сервер для Render
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
