@@ -12,18 +12,19 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
-# ВСТАВЬ СЮДА СВОЙ НОВЫЙ ТОКЕН ИЗ @BotFather
 BOT_TOKEN = "8099587334:AAHPFtG9QEGxtvdD7W7S6n8Ntc2ng7v1Meo"
-ADMIN_ID = 5153531676
+ADMIN_ID = 5153531676  # Твой реальный ID
 DB_NAME = "business_messages.db"
+BOT_USERNAME = "@nodelchat_bot"  # Юзернейм твоего бота для подписи внизу
 # =============================================
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 router = Router()
 
 async def init_db():
-    """Инициализация базы данных SQLite"""
+    """Инициализация базы данных SQLite с авто-обновлением схемы"""
     async with aiosqlite.connect(DB_NAME) as db:
+        # Создаем таблицу, если ее нет
         await db.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 chat_id INTEGER,
@@ -34,6 +35,12 @@ async def init_db():
                 PRIMARY KEY (chat_id, message_id)
             )
         """)
+        # Безопасно добавляем колонку для юзернейма (если база уже существовала)
+        try:
+            await db.execute("ALTER TABLE messages ADD COLUMN sender_username TEXT")
+        except aiosqlite.OperationalError:
+            pass # Колонка уже существует, всё ок
+            
         await db.commit()
     logging.info("База данных успешно инициализирована.")
 
@@ -57,13 +64,10 @@ async def cmd_start(message: Message):
         "Доступные команды:\n"
         "📊 /stats — посмотреть, сколько сообщений сохранено в базе"
     )
-    logging.info("Приветственное сообщение успешно отправлено админу.")
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
     """Показывает статистику сохраненных сообщений"""
-    logging.info(f"Запрос статистики от ID: {message.from_user.id}")
-    
     if message.from_user.id != ADMIN_ID:
         return
 
@@ -81,25 +85,28 @@ async def cmd_stats(message: Message):
 @router.business_message()
 async def on_new_business_message(message: Message):
     """Ловим новые бизнес-сообщения и сохраняем в БД"""
-    logging.info("Поймано новое бизнес-сообщение. Сохраняю в базу...")
-    
     text = message.text or message.caption or "[Медиафайл без текста / Стикер / Голосовое]"
+    
     sender_name = message.from_user.full_name if message.from_user else "Неизвестный"
+    sender_username = message.from_user.username if message.from_user and message.from_user.username else ""
     
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
-            "INSERT OR REPLACE INTO messages (chat_id, message_id, sender_name, text, date) VALUES (?, ?, ?, ?, ?)",
-            (message.chat.id, message.message_id, sender_name, text, int(message.date.timestamp()))
+            "INSERT OR REPLACE INTO messages (chat_id, message_id, sender_name, sender_username, text, date) VALUES (?, ?, ?, ?, ?, ?)",
+            (message.chat.id, message.message_id, sender_name, sender_username, text, int(message.date.timestamp()))
         )
         await db.commit()
 
 @router.edited_business_message()
 async def on_edited_business_message(message: Message, bot: Bot):
     """Ловим изменение бизнес-сообщения и скидываем в ЛС бота"""
-    logging.info("Поймано ИЗМЕНЕНИЕ бизнес-сообщения. Обрабатываю...")
-    
     new_text = message.text or message.caption or "[Медиафайл / Стикер]"
+    
     sender_name = message.from_user.full_name if message.from_user else "Неизвестный"
+    sender_username = message.from_user.username if message.from_user and message.from_user.username else ""
+    
+    # Формируем красивое имя автора
+    author_str = f"{sender_name} (@{sender_username})" if sender_username else sender_name
     
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute(
@@ -116,47 +123,55 @@ async def on_edited_business_message(message: Message, bot: Bot):
         )
         await db.commit()
 
+    # Оформление как на скриншоте (через HTML blockquote)
     alert = (
-        f"✏️ <b>Изменено сообщение от:</b> {sender_name}\n\n"
-        f"❌ <b>Было:</b>\n{old_text}\n\n"
-        f"✅ <b>Стало:</b>\n{new_text}"
+        f"{author_str} изменил(а) сообщение:\n\n"
+        f"Old:\n"
+        f"<blockquote>{old_text}</blockquote>\n"
+        f"New:\n"
+        f"<blockquote>{new_text}</blockquote>\n\n"
+        f"{BOT_USERNAME}"
     )
     
     try:
         await bot.send_message(ADMIN_ID, alert)
-        logging.info("Уведомление об изменении успешно отправлено админу.")
     except Exception as e:
         logging.error(f"КРИТИЧЕСКАЯ ОШИБКА ОТПРАВКИ (ИЗМЕНЕНИЕ): {e}")
 
 @router.deleted_business_messages()
 async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bot):
-    """Ловим удаление бизнес-сообний и скидываем в ЛС бота"""
-    logging.info(f"Поймано УДАЛЕНИЕ бизнес-сообщения. ID сообщений: {deleted.message_ids}")
-    
+    """Ловим удаление бизнес-сообщений и скидываем в ЛС бота"""
     chat_id = deleted.chat.id
     
     async with aiosqlite.connect(DB_NAME) as db:
         for msg_id in deleted.message_ids:
+            # Пытаемся достать юзернейм из базы
             async with db.execute(
-                "SELECT sender_name, text, date FROM messages WHERE chat_id = ? AND message_id = ?",
+                "SELECT sender_name, sender_username, text FROM messages WHERE chat_id = ? AND message_id = ?",
                 (chat_id, msg_id)
             ) as cursor:
                 row = await cursor.fetchone()
 
             if row:
-                sender_name, text, timestamp = row
-                dt_str = datetime.fromtimestamp(timestamp).strftime('%d.%m.%Y %H:%M:%S')
+                sender_name = row[0]
+                sender_username = row[1]
+                text = row[2]
+                
+                # Формируем красивое имя
+                if sender_username:
+                    author_str = f"{sender_name} (@{sender_username})"
+                else:
+                    author_str = sender_name
 
+                # Оформление как на скриншоте
                 alert = (
-                    f"🗑 <b>УДАЛЕНО СООБЩЕНИЕ!</b>\n"
-                    f"👤 <b>От:</b> {sender_name}\n"
-                    f"📝 <b>Текст:</b> {text}\n"
-                    f"🕐 <b>Было написано:</b> {dt_str}"
+                    f"{author_str} удалил(а) сообщение:\n\n"
+                    f"<blockquote>{text}</blockquote>\n\n"
+                    f"{BOT_USERNAME}"
                 )
                 
                 try:
                     await bot.send_message(ADMIN_ID, alert)
-                    logging.info("Уведомление об удалении успешно отправлено админу.")
                 except Exception as e:
                     logging.error(f"КРИТИЧЕСКАЯ ОШИБКА ОТПРАВКИ (УДАЛЕНИЕ): {e}")
 
