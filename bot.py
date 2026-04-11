@@ -12,7 +12,7 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
-BOT_TOKEN = "ВАШ_ТОКЕН_ОТ_BOTFATHER"
+BOT_TOKEN = "8099587334:AAEiprR86Iavdkx-6CGuPLKh0yP1WMr_Jp0"
 ADMIN_ID = 5958249983 # Ваш ID
 DB_NAME = "business_messages.db"
 # =============================================
