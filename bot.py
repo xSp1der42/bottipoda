@@ -14,7 +14,7 @@ from aiogram.filters import CommandStart, Command
 # ================= НАСТРОЙКИ =================
 # ВСТАВЬ СЮДА СВОЙ НОВЫЙ ТОКЕН ИЗ @BotFather
 BOT_TOKEN = "8099587334:AAHPFtG9QEGxtvdD7W7S6n8Ntc2ng7v1Meo"
-ADMIN_ID = 5958249983
+ADMIN_ID = 5153531676
 DB_NAME = "business_messages.db"
 # =============================================
 
