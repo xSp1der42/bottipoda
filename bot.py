@@ -11,8 +11,9 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 # ================= НАСТРОЙКИ =================
+# Вставьте сюда НОВЫЙ токен от @BotFather (старый скомпрометирован!)
 BOT_TOKEN = "8099587334:AAEiprR86Iavdkx-6CGuPLKh0yP1WMr_Jp0"
-ADMIN_ID = 5958249983
+ADMIN_ID = 5958249983 # Ваш ID
 DB_NAME = "business_messages.db"
 # =============================================
 
@@ -73,9 +74,14 @@ async def on_edited_business_message(message: Message, bot: Bot):
         f"❌ <b>Было:</b>\n{old_text}\n\n"
         f"✅ <b>Стало:</b>\n{new_text}"
     )
-    await bot.send_message(ADMIN_ID, alert)
+    # Отправляем уведомление в избранное (ADMIN_ID)
+    try:
+        await bot.send_message(ADMIN_ID, alert)
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление об изменении: {e}")
 
-@router.deleted_business_messages()
+# ИСПРАВЛЕНО: Правильное название декоратора в aiogram 3 - business_messages_deleted
+@router.business_messages_deleted()
 async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bot):
     """Ловим удаление бизнес-сообщений"""
     chat_id = deleted.chat.id
@@ -97,14 +103,17 @@ async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bo
                     f"📝 <b>Текст:</b> {text}\n"
                     f"🕐 <b>Время:</b> {dt_str}"
                 )
-                await bot.send_message(ADMIN_ID, alert)
+                try:
+                    await bot.send_message(ADMIN_ID, alert)
+                except Exception as e:
+                    logging.error(f"Не удалось отправить уведомление об удалении: {e}")
 
                 await db.execute("DELETE FROM messages WHERE chat_id = ? AND message_id = ?", (chat_id, msg_id))
         
         await db.commit()
 
 async def handle_ping(request):
-    """Заглушка для Render, чтобы он видел, что сервис жив"""
+    """Заглушка для Render / серверов, требующих веб-порт"""
     return web.Response(text="Бот работает!")
 
 async def main():
@@ -115,19 +124,20 @@ async def main():
     dp.include_router(router)
     
     # ---------------------------------------------------------
-    # Запускаем фиктивный веб-сервер, чтобы Render не убил бота
+    # Запускаем фиктивный веб-сервер для Render
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Render автоматически передает нужный порт через переменную окружения PORT
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     # ---------------------------------------------------------
 
-    print("Бот успешно запущен на сервере!")
+    logging.info("Бот запущен и готов ловить бизнес-сообщения!")
+    # Удаляем вебхуки, чтобы поллинг работал корректно
+    await bot.delete_webhook(drop_pending_updates=True) 
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
