@@ -14,7 +14,7 @@ from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
 
-BOT_TOKEN = "8099587334:AAHPFtG9QEGxtvdD7W7S6n8Ntc2ng7v1Meo"
+BOT_TOKEN = "8099587334:AAHX7m_WveVzCDQtMcC5QTUC5cSUYV7rsvg"
 ADMIN_ID = 5153531676
 DB_NAME = "business_messages.db"
 BOT_USERNAME = "@nodelchat_bot"
