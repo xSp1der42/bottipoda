@@ -11,7 +11,6 @@ from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection, 
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # ================= НАСТРОЙКИ =================
 
@@ -20,14 +19,8 @@ ADMIN_ID = 5153531676
 DB_NAME = "business_messages.db"
 BOT_USERNAME = "@nodelchat_bot"
 
-# Каналы для обязательной подписки
+# Каналы для обязательной подписки (БОТ ДОЛЖЕН БЫТЬ АДМИНОМ В ЭТИХ КАНАЛАХ!)
 CHANNELS = ["@xSp1der42", "@neon9_news"]
-
-# === НАСТРОЙКИ WEBHOOK ДЛЯ RENDER ===
-# Автоматически берет ссылку твоего сервера на Render
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://bottipoda.onrender.com")
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 
 # =============================================
 
@@ -35,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 router = Router()
 
 async def init_db():
-    """Инициализация базы данных SQLite с полной изоляцией пользователей"""
+    """Инициализация базы данных SQLite"""
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS messages_v2 (
@@ -65,8 +58,9 @@ async def init_db():
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 
 async def check_subscription(bot: Bot, user_id: int) -> bool:
+    """Проверяет подписку на каналы."""
     if user_id == ADMIN_ID:
-        return True
+        return True # Админу можно всё
 
     for channel in CHANNELS:
         try:
@@ -74,7 +68,7 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
             if member.status in ['left', 'kicked', 'banned']:
                 return False
         except Exception as e:
-            logging.error(f"Ошибка проверки подписки на {channel}: {e}")
+            logging.error(f"Ошибка проверки подписки на {channel}. Убедитесь, что бот назначен АДМИНИСТРАТОРОМ в этом канале! Ошибка: {e}")
             return False 
             
     return True
@@ -86,6 +80,7 @@ async def get_owner_id(connection_id: str) -> int:
             return row[0] if row else None
 
 def extract_media(message: Message):
+    """Извлекает всё (фото, гс, кружочки, стикеры, контакты)"""
     file_id = None
     content_type = message.content_type
     text = message.text or message.caption or ""
@@ -113,6 +108,7 @@ def extract_media(message: Message):
     return file_id, content_type, text
 
 async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str, content_type: str):
+    """Отправка медиа или текста одним сообщением"""
     try:
         if not file_id:
             await bot.send_message(target_id, caption)
@@ -148,7 +144,7 @@ async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str,
             
     except Exception as e:
         logging.error(f"Ошибка отправки файла: {e}")
-        await bot.send_message(target_id, f"{caption}\n\n⚠️ <i>[Не удалось загрузить сам файл, возможно он полностью удален с серверов Telegram]</i>")
+        await bot.send_message(target_id, f"{caption}\n\n⚠️ <i>[Не удалось загрузить сам файл, возможно он удален серверами Telegram]</i>")
 
 
 # ================= 1. ОБРАБОТЧИКИ ОБЫЧНЫХ СООБЩЕНИЙ =================
@@ -157,23 +153,25 @@ async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str,
 async def cmd_start(message: Message, bot: Bot):
     is_subbed = await check_subscription(bot, message.from_user.id)
     
+    # Кнопки для подписки показываются В ЛЮБОМ СЛУЧАЕ, если человек не подписан
     if not is_subbed:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Канал 1", url="https://t.me/xSp1der42")],
-            [InlineKeyboardButton(text="📢 Канал 2", url="https://t.me/neon9_news")]
+            [InlineKeyboardButton(text="📢 Канал 1 (xSp1der42)", url="https://t.me/xSp1der42")],
+            [InlineKeyboardButton(text="📢 Канал 2 (neon9_news)", url="https://t.me/neon9_news")]
         ])
         await message.answer(
-            "❌ <b>ОШИБКА ДОСТУПА</b>\n\n"
-            "Чтобы использовать этого бота и сохранять сообщения, вы <b>ОБЯЗАНЫ</b> быть подписанными на наши каналы.\n\n"
-            "Подпишитесь, а затем снова нажмите /start",
+            "❌ <b>ОШИБКА ДОСТУПА: ВЫ НЕ ПОДПИСАНЫ!</b>\n\n"
+            "Чтобы использовать этого бота и сохранять удаленные сообщения, вы <b>ОБЯЗАНЫ</b> подписаться на два наших канала.\n\n"
+            "👇 <b>Подпишитесь по кнопкам ниже, а затем снова нажмите /start</b>",
             reply_markup=keyboard
         )
         return
 
     welcome_text = (
-        "👋 <b>Привет! Я работаю и готов сохранять сообщения.</b>\n\n"
-        "Теперь я буду присылать тебе сюда удаленные и измененные сообщения ТОЛЬКО из твоих чатов (включая фото, ГС, видео и стикеры)!\n\n"
-        "<i>Если ты отпишешься от обязательных каналов — я автоматически перестану работать.</i>"
+        "✅ <b>Отлично, подписка подтверждена! Бот готов к работе.</b>\n\n"
+        "Теперь подключи меня в настройках: <b>Настройки -> Telegram Business -> Чат-боты</b>.\n\n"
+        "С этого момента я буду ловить удалённые и измененные сообщения (включая фото, ГС, кружочки и стикеры) из твоих диалогов и присылать их сюда.\n\n"
+        "<i>⚠️ Если ты отпишешься от обязательных каналов — я автоматически перестану сохранять твои сообщения.</i>"
     )
     
     if message.from_user.id == ADMIN_ID:
@@ -318,33 +316,11 @@ async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bo
         await db.commit()
 
 
-# ================= 3. ВЕБХУКИ И ЗАПУСК =================
-
-async def on_startup(bot: Bot):
-    logging.info("Удаляем старые вебхуки или поллинг...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    logging.info(f"Устанавливаем Webhook на {WEBHOOK_URL} ...")
-    await bot.set_webhook(
-        url=WEBHOOK_URL,
-        allowed_updates=[
-            "message", 
-            "business_connection", 
-            "business_message", 
-            "edited_business_message", 
-            "deleted_business_messages"
-        ],
-        drop_pending_updates=True
-    )
-
-async def on_shutdown(bot: Bot):
-    logging.info("Остановка бота... Удаляем Webhook...")
-    await bot.delete_webhook()
-    await bot.session.close()
+# ================= 3. ВЕБ-ЗАГЛУШКА И ПОЛЛИНГ =================
 
 async def handle_ping(request):
-    """Корневой URL для проверки жизнеспособности (Health check)"""
-    return web.Response(text="Бот успешно работает через Webhook без конфликтов!")
+    """Корневой URL для проверки жизнеспособности (Health check от Render)"""
+    return web.Response(text="Бот успешно работает! Сообщения сохраняются.")
 
 async def main():
     await init_db()
@@ -353,32 +329,42 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
 
-    # Привязываем функции старта и выключения
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-
-    # Настраиваем aiohttp сервер для приема сообщений от Telegram
+    # Настраиваем фиктивный веб-сервер, чтобы Render не выключал приложение
     app = web.Application()
     app.router.add_get('/', handle_ping)
-
-    webhook_requests_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot)
-
-    # Запускаем сервер на порту, который просит Render
-    port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
+    
+    port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
-    
-    logging.info(f"Запуск веб-сервера на порту {port}")
     await site.start()
-    
-    # Бесконечный цикл, чтобы программа не закрылась
-    await asyncio.Event().wait()
+    logging.info(f"Веб-заглушка запущена на порту {port}")
+
+    # Удаляем вебхук, чтобы можно было запустить надежный поллинг
+    logging.info("Очистка старых вебхуков...")
+    await bot.delete_webhook(drop_pending_updates=True)
+
+    # СПЕЦИАЛЬНАЯ ЗАДЕРЖКА ДЛЯ RENDER
+    # Ждем 5 секунд, чтобы старый зависший контейнер Render успел отключиться 
+    # и не вызывал ошибку Conflict.
+    logging.info("Ожидание 5 секунд (защита от конфликта серверов)...")
+    await asyncio.sleep(5)
+
+    logging.info("Запуск безотказного Polling режима...")
+    try:
+        await dp.start_polling(bot, allowed_updates=[
+            "message", 
+            "business_connection", 
+            "business_message", 
+            "edited_business_message", 
+            "deleted_business_messages"
+        ])
+    except Exception as e:
+        logging.error(f"Критическая ошибка поллинга: {e}")
+    finally:
+        logging.info("Остановка бота...")
+        await bot.session.close()
+        await runner.cleanup()
 
 if __name__ == "__main__":
     try:
