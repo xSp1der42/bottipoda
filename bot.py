@@ -11,6 +11,7 @@ from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection, 
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # ================= НАСТРОЙКИ =================
 
@@ -19,8 +20,14 @@ ADMIN_ID = 5153531676
 DB_NAME = "business_messages.db"
 BOT_USERNAME = "@nodelchat_bot"
 
-# Каналы для обязательной подписки (БОТ ДОЛЖЕН БЫТЬ АДМИНОМ В ЭТИХ КАНАЛАХ!)
+# Каналы для обязательной подписки
 CHANNELS = ["@xSp1der42", "@neon9_news"]
+
+# === НАСТРОЙКИ WEBHOOK ДЛЯ RENDER ===
+# Автоматически берет ссылку твоего сервера на Render
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://bottipoda.onrender.com")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{RENDER_URL}{WEBHOOK_PATH}"
 
 # =============================================
 
@@ -58,9 +65,8 @@ async def init_db():
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 
 async def check_subscription(bot: Bot, user_id: int) -> bool:
-    """Проверяет, подписан ли пользователь на обязательные каналы."""
     if user_id == ADMIN_ID:
-        return True # Админу можно всё
+        return True
 
     for channel in CHANNELS:
         try:
@@ -68,20 +74,18 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
             if member.status in ['left', 'kicked', 'banned']:
                 return False
         except Exception as e:
-            logging.error(f"Ошибка проверки подписки на {channel} для {user_id}. Бот админ в канале?: {e}")
+            logging.error(f"Ошибка проверки подписки на {channel}: {e}")
             return False 
             
     return True
 
 async def get_owner_id(connection_id: str) -> int:
-    """Получает ID владельца бизнес-аккаунта по ID подключения."""
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id FROM business_connections WHERE connection_id = ?", (connection_id,)) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
 
 def extract_media(message: Message):
-    """Извлекает file_id, тип контента и текст/данные из ЛЮБОГО сообщения для сохранения в БД."""
     file_id = None
     content_type = message.content_type
     text = message.text or message.caption or ""
@@ -95,7 +99,6 @@ def extract_media(message: Message):
     elif message.animation: file_id = message.animation.file_id
     elif message.audio: file_id = message.audio.file_id
     
-    # Сохраняем специфичные форматы (Контакты, Локации, Опросы) в виде текста
     elif message.contact: 
         text = f"📱 Контакт: {message.contact.first_name} ({message.contact.phone_number})"
     elif message.location: 
@@ -110,21 +113,14 @@ def extract_media(message: Message):
     return file_id, content_type, text
 
 async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str, content_type: str):
-    """
-    Умная отправка медиа. 
-    Голосовые, фото, видео - отправляются ОДНИМ сообщением.
-    Стикеры и кружочки - отправляются через Reply (так как TG не поддерживает текст внутри них).
-    """
     try:
-        # Если медиафайла нет, просто шлем текст
         if not file_id:
             await bot.send_message(target_id, caption)
             return
 
-        # Если текст больше 1024 символов (лимит телеграма для медиа), мы вынуждены разделить
         if len(caption) > 1024 and content_type not in ['video_note', 'sticker']:
             sent_msg = await bot.send_message(target_id, caption)
-            caption = "" # Очищаем текст, так как уже отправили его
+            caption = "" 
             reply_id = sent_msg.message_id
         else:
             reply_id = None
@@ -142,7 +138,6 @@ async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str,
         elif content_type == 'audio': 
             await bot.send_audio(target_id, file_id, caption=caption, reply_to_message_id=reply_id)
         elif content_type in ['video_note', 'sticker']:
-            # Телеграм физически не поддерживает текст для стикеров и кружочков. Делаем связку через Reply
             sent_msg = await bot.send_message(target_id, caption)
             if content_type == 'video_note':
                 await bot.send_video_note(target_id, file_id, reply_to_message_id=sent_msg.message_id)
@@ -160,7 +155,6 @@ async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str,
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
-    """Реакция на команду /start внутри диалога с самим ботом"""
     is_subbed = await check_subscription(bot, message.from_user.id)
     
     if not is_subbed:
@@ -189,7 +183,6 @@ async def cmd_start(message: Message, bot: Bot):
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message):
-    """Показывает подробную статистику (Только для Админа)"""
     if message.from_user.id != ADMIN_ID:
         return
 
@@ -218,7 +211,6 @@ async def cmd_stats(message: Message):
 
 @router.business_connection()
 async def on_business_connection(connection: BusinessConnection):
-    """Ловим подключение бота к бизнес-аккаунту пользователя"""
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "INSERT OR REPLACE INTO business_connections (connection_id, user_id) VALUES (?, ?)",
@@ -229,14 +221,10 @@ async def on_business_connection(connection: BusinessConnection):
 
 @router.business_message()
 async def on_new_business_message(message: Message, bot: Bot):
-    """Ловим новые бизнес-сообщения и сохраняем в БД (Текст, Медиа, Файлы, ГС)"""
     connection_id = message.business_connection_id
     owner_id = await get_owner_id(connection_id)
     
-    if not owner_id:
-        return
-        
-    if not await check_subscription(bot, owner_id):
+    if not owner_id or not await check_subscription(bot, owner_id):
         return
 
     file_id, content_type, text = extract_media(message)
@@ -252,7 +240,6 @@ async def on_new_business_message(message: Message, bot: Bot):
 
 @router.edited_business_message()
 async def on_edited_business_message(message: Message, bot: Bot):
-    """Ловим изменение и скидываем в ЛС ВЛАДЕЛЬЦУ ИМЕННО ЭТОГО АККАУНТА ОДНИМ СООБЩЕНИЕМ"""
     connection_id = message.business_connection_id
     owner_id = await get_owner_id(connection_id)
     
@@ -284,11 +271,9 @@ async def on_edited_business_message(message: Message, bot: Bot):
     safe_old_text = html.escape(old_text) if old_text else "<i>[Без текста/Только медиа]</i>"
     safe_new_text = html.escape(new_text) if new_text else "<i>[Без текста/Только медиа]</i>"
 
-    # Игнорируем пустые изменения (иногда ТГ присылает ложные апдейты)
     if old_text == new_text and old_file_id == new_file_id:
         return
 
-    # Собираем все в один красивый текст (одно сообщение)
     caption = (
         f"✏️ <b>{author_str} ИЗМЕНИЛ(А) СООБЩЕНИЕ:</b>\n\n"
         f"<b>❌ Было:</b>\n<blockquote>{safe_old_text}</blockquote>\n"
@@ -296,13 +281,11 @@ async def on_edited_business_message(message: Message, bot: Bot):
         f"{BOT_USERNAME}"
     )
 
-    # Отправляем одним сообщением (Текст "было/стало" + Прикрепленный старый медиафайл)
     await send_media_alert(bot, owner_id, caption, old_file_id, old_content_type)
 
 
 @router.deleted_business_messages()
 async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bot):
-    """Ловим удаление и скидываем в ЛС ВЛАДЕЛЬЦУ ИМЕННО ЭТОГО АККАУНТА (текст + сам файл)"""
     connection_id = deleted.business_connection_id
     owner_id = await get_owner_id(connection_id)
     
@@ -329,20 +312,39 @@ async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bo
                 caption += f"<blockquote>{safe_text}</blockquote>\n\n"
                 caption += f"{BOT_USERNAME}"
                 
-                # Отправляем одним сообщением (Удаленный медиафайл + Текст под ним)
                 await send_media_alert(bot, owner_id, caption, file_id, content_type)
-
-                # Удаляем из БД чтобы не засорять память
                 await db.execute("DELETE FROM messages_v2 WHERE connection_id = ? AND chat_id = ? AND message_id = ?", (connection_id, chat_id, msg_id))
         
         await db.commit()
 
 
-# ================= 3. ЗАГЛУШКА ДЛЯ СЕРВЕРА И ЗАПУСК =================
+# ================= 3. ВЕБХУКИ И ЗАПУСК =================
+
+async def on_startup(bot: Bot):
+    logging.info("Удаляем старые вебхуки или поллинг...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    logging.info(f"Устанавливаем Webhook на {WEBHOOK_URL} ...")
+    await bot.set_webhook(
+        url=WEBHOOK_URL,
+        allowed_updates=[
+            "message", 
+            "business_connection", 
+            "business_message", 
+            "edited_business_message", 
+            "deleted_business_messages"
+        ],
+        drop_pending_updates=True
+    )
+
+async def on_shutdown(bot: Bot):
+    logging.info("Остановка бота... Удаляем Webhook...")
+    await bot.delete_webhook()
+    await bot.session.close()
 
 async def handle_ping(request):
-    """Ответ для Render, чтобы он не убил процесс"""
-    return web.Response(text="Бот работает, сообщения изолированы, медиа сохраняются в БД!")
+    """Корневой URL для проверки жизнеспособности (Health check)"""
+    return web.Response(text="Бот успешно работает через Webhook без конфликтов!")
 
 async def main():
     await init_db()
@@ -351,39 +353,32 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
 
-    # Настройка веб-сервера для Render
+    # Привязываем функции старта и выключения
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    # Настраиваем aiohttp сервер для приема сообщений от Telegram
     app = web.Application()
     app.router.add_get('/', handle_ping)
+
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+
+    # Запускаем сервер на порту, который просит Render
+    port = int(os.environ.get("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
-
-    port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
-
-    # Запускаем веб-сервер
+    
+    logging.info(f"Запуск веб-сервера на порту {port}")
     await site.start()
-    logging.info(f"Веб-заглушка успешно запущена на порту {port}")
-
-    # Удаляем вебхуки, чтобы поллинг работал
-    logging.info("Удаляем старые вебхуки...")
-    await bot.delete_webhook(drop_pending_updates=True) 
-
-    logging.info("Запускаем поллинг бота...")
-    try:
-        # ВАЖНО: Жестко указываем Телеграму присылать ВСЕ типы обновлений
-        await dp.start_polling(bot, allowed_updates=[
-            "message", 
-            "business_connection", 
-            "business_message", 
-            "edited_business_message", 
-            "deleted_business_messages"
-        ])
-    finally:
-        # ПРАВИЛЬНОЕ ЗАВЕРШЕНИЕ РАБОТЫ
-        logging.info("Остановка бота... Очистка соединений...")
-        await bot.session.close()
-        await runner.cleanup()
-        logging.info("Все соединения закрыты.")
+    
+    # Бесконечный цикл, чтобы программа не закрылась
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
