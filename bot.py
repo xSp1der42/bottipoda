@@ -14,7 +14,7 @@ from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
 
-BOT_TOKEN = "8099587334:AAHX7m_WveVzCDQtMcC5QTUC5cSUYV7rsvg"
+BOT_TOKEN = "8099587334:AAHqjyQY0Px7XcGw5jH0mRhB6c0ROigDh9w"
 ADMIN_ID = 5153531676
 DB_NAME = "business_messages.db"
 BOT_USERNAME = "@nodelchat_bot"
@@ -28,7 +28,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 router = Router()
 
 async def init_db():
-    """Инициализация базы данных SQLite"""
+    """Инициализация базы данных SQLite с полной изоляцией пользователей"""
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS messages_v2 (
@@ -74,6 +74,7 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
     return True
 
 async def get_owner_id(connection_id: str) -> int:
+    """Получает ID владельца бизнес-аккаунта"""
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT user_id FROM business_connections WHERE connection_id = ?", (connection_id,)) as cursor:
             row = await cursor.fetchone()
@@ -93,27 +94,22 @@ def extract_media(message: Message):
     elif message.sticker: file_id = message.sticker.file_id
     elif message.animation: file_id = message.animation.file_id
     elif message.audio: file_id = message.audio.file_id
-    
-    elif message.contact: 
-        text = f"📱 Контакт: {message.contact.first_name} ({message.contact.phone_number})"
-    elif message.location: 
-        text = f"📍 Локация: {message.location.latitude}, {message.location.longitude}"
-    elif message.poll: 
-        text = f"📊 Опрос: {message.poll.question}"
-    elif message.dice: 
-        text = f"🎲 Эмодзи: {message.dice.emoji} (Выпало: {message.dice.value})"
-    elif message.story:
-        text = f"📖 [Пользователь отправил Историю (Story)]"
+    elif message.contact: text = f"📱 Контакт: {message.contact.first_name} ({message.contact.phone_number})"
+    elif message.location: text = f"📍 Локация: {message.location.latitude}, {message.location.longitude}"
+    elif message.poll: text = f"📊 Опрос: {message.poll.question}"
+    elif message.dice: text = f"🎲 Эмодзи: {message.dice.emoji} (Выпало: {message.dice.value})"
+    elif message.story: text = f"📖 [Пользователь отправил Историю (Story)]"
 
     return file_id, content_type, text
 
 async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str, content_type: str):
-    """Отправка медиа или текста одним сообщением"""
+    """Отправка медиа или текста ОДНИМ сообщением"""
     try:
         if not file_id:
             await bot.send_message(target_id, caption)
             return
 
+        # Если текст слишком длинный для медиа
         if len(caption) > 1024 and content_type not in ['video_note', 'sticker']:
             sent_msg = await bot.send_message(target_id, caption)
             caption = "" 
@@ -134,6 +130,7 @@ async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str,
         elif content_type == 'audio': 
             await bot.send_audio(target_id, file_id, caption=caption, reply_to_message_id=reply_id)
         elif content_type in ['video_note', 'sticker']:
+            # Телеграм запрещает текст внутри стикеров/кружочков, делаем реплай
             sent_msg = await bot.send_message(target_id, caption)
             if content_type == 'video_note':
                 await bot.send_video_note(target_id, file_id, reply_to_message_id=sent_msg.message_id)
@@ -153,7 +150,6 @@ async def send_media_alert(bot: Bot, target_id: int, caption: str, file_id: str,
 async def cmd_start(message: Message, bot: Bot):
     is_subbed = await check_subscription(bot, message.from_user.id)
     
-    # Кнопки для подписки показываются В ЛЮБОМ СЛУЧАЕ, если человек не подписан
     if not is_subbed:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📢 Канал 1 (xSp1der42)", url="https://t.me/xSp1der42")],
@@ -319,8 +315,7 @@ async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bo
 # ================= 3. ВЕБ-ЗАГЛУШКА И ПОЛЛИНГ =================
 
 async def handle_ping(request):
-    """Корневой URL для проверки жизнеспособности (Health check от Render)"""
-    return web.Response(text="Бот успешно работает! Сообщения сохраняются.")
+    return web.Response(text="Бот работает и сохраняет сообщения!")
 
 async def main():
     await init_db()
@@ -329,7 +324,6 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
 
-    # Настраиваем фиктивный веб-сервер, чтобы Render не выключал приложение
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
@@ -337,20 +331,17 @@ async def main():
     
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
+    
     await site.start()
     logging.info(f"Веб-заглушка запущена на порту {port}")
 
-    # Удаляем вебхук, чтобы можно было запустить надежный поллинг
-    logging.info("Очистка старых вебхуков...")
     await bot.delete_webhook(drop_pending_updates=True)
 
-    # СПЕЦИАЛЬНАЯ ЗАДЕРЖКА ДЛЯ RENDER
-    # Ждем 5 секунд, чтобы старый зависший контейнер Render успел отключиться 
-    # и не вызывал ошибку Conflict.
-    logging.info("Ожидание 5 секунд (защита от конфликта серверов)...")
-    await asyncio.sleep(5)
+    # Защита от конфликта серверов
+    logging.warning("⏳ Ждем 30 секунд, чтобы Render не выдал Conflict Error...")
+    await asyncio.sleep(30)
 
-    logging.info("Запуск безотказного Polling режима...")
+    logging.info("🚀 Запуск безотказного Polling режима...")
     try:
         await dp.start_polling(bot, allowed_updates=[
             "message", 
