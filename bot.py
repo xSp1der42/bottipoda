@@ -6,7 +6,7 @@ from datetime import datetime
 import aiosqlite
 from aiohttp import web
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import Message, BusinessMessagesDeleted, BusinessConnection, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -14,23 +14,27 @@ from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
 
-BOT_TOKEN = "8099587334:AAHsx8L1LWlppUMjuZ6ZrwLL4BnKHkz4_ZU"
+BOT_TOKEN = "8099587334:AAFSKjWSi0CU8gwe1YYDWHa7zIWLX7jTxh0"
 ADMIN_ID = 5153531676
 DB_NAME = "business_messages.db"
 BOT_USERNAME = "@nodelchat_bot"
 
 CHANNELS = ["@xSp1der42", "@neon9_news"]
 
-# Текст рассылки при рестарте. Если не нужна рассылка — поставь пустую строку ""
+# Время запуска бота (для вычисления аптайма)
+BOT_START_TIME = datetime.now()
+
+# Текст рассылки при КАЖДОМ запуске/рестарте бота.
 RESTART_NOTIFY_TEXT = (
-    "🔄 <b>Бот был обновлён!</b>\n\n"
-    "Чтобы всё продолжало работать — переподключи бота:\n\n"
-    "1️⃣ Зайди в <b>Настройки → Telegram для бизнеса → Чат-боты</b>\n"
-    f"2️⃣ Удали <code>@nodelchat_bot</code> из списка\n"
-    "3️⃣ Подожди 5 секунд\n"
-    f"4️⃣ Снова добавь <code>@nodelchat_bot</code>\n"
-    "5️⃣ Напиши мне /start\n\n"
-    "❓ Если уже подключён и всё работает — можешь проигнорировать это сообщение."
+    "🔄 <b>В БОТЕ ВЫШЛО ОБНОВЛЕНИЕ!</b>\n\n"
+    "⚙️ <b>Чтобы бот продолжил работать и перехватывать сообщения, сделай следующее:</b>\n\n"
+    "1️⃣ Зайди в <b>Настройки Telegram</b>\n"
+    "2️⃣ Нажми <b>Telegram для бизнеса → Чат-боты</b>\n"
+    f"3️⃣ Найди в списке <code>{BOT_USERNAME}</code> и <b>УДАЛИ ЕГО</b> оттуда\n"
+    "4️⃣ Подожди 5-10 секунд\n"
+    f"5️⃣ В этой же менюшке снова введи <code>{BOT_USERNAME}</code> и нажми <b>Добавить</b>\n"
+    "6️⃣ Вернись сюда и напиши мне /start\n\n"
+    "⚠️ <i>Если этого не сделать, я не смогу ловить удаленные сообщения!</i>"
 )
 
 # =============================================
@@ -40,6 +44,7 @@ router = Router()
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
+        # Таблица для временного хранения сообщений (чтобы было с чем сравнивать)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS messages_v2 (
                 connection_id TEXT,
@@ -54,13 +59,14 @@ async def init_db():
                 PRIMARY KEY (connection_id, chat_id, message_id)
             )
         """)
+        # Таблица активных бизнес-подключений (Premium пользователи)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS business_connections (
                 connection_id TEXT PRIMARY KEY,
                 user_id INTEGER
             )
         """)
-        # Таблица всех пользователей которые писали боту — для рассылки при рестарте
+        # Таблица всех пользователей бота
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -69,14 +75,30 @@ async def init_db():
                 first_seen INTEGER
             )
         """)
+        # Таблица для глобальной статистики (счетчики перехватов)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_stats (
+                stat_name TEXT PRIMARY KEY,
+                stat_value INTEGER DEFAULT 0
+            )
+        """)
+        # Инициализируем счетчики, если их нет
+        await db.execute("INSERT OR IGNORE INTO bot_stats (stat_name, stat_value) VALUES ('deleted_caught', 0)")
+        await db.execute("INSERT OR IGNORE INTO bot_stats (stat_name, stat_value) VALUES ('edited_caught', 0)")
+        
         await db.commit()
     logging.info("База данных инициализирована.")
 
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 
+async def inc_stat(stat_name: str):
+    """Увеличивает счетчик статистики на 1"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE bot_stats SET stat_value = stat_value + 1 WHERE stat_name = ?", (stat_name,))
+        await db.commit()
+
 async def save_user(user_id: int, username: str = "", full_name: str = ""):
-    """Сохраняет пользователя в БД (если уже есть — игнорирует)"""
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "INSERT OR IGNORE INTO users (user_id, username, full_name, first_seen) VALUES (?, ?, ?, ?)",
@@ -85,7 +107,6 @@ async def save_user(user_id: int, username: str = "", full_name: str = ""):
         await db.commit()
 
 async def broadcast_restart(bot: Bot):
-    """Рассылает уведомление о рестарте всем пользователям из БД"""
     if not RESTART_NOTIFY_TEXT:
         return
 
@@ -94,7 +115,7 @@ async def broadcast_restart(bot: Bot):
             users = await cursor.fetchall()
 
     if not users:
-        logging.info("Нет пользователей для рассылки.")
+        logging.info("Нет пользователей для рассылки при рестарте.")
         return
 
     success, failed = 0, 0
@@ -102,20 +123,20 @@ async def broadcast_restart(bot: Bot):
         try:
             await bot.send_message(user_id, RESTART_NOTIFY_TEXT)
             success += 1
-            await asyncio.sleep(0.05)  # небольшая задержка чтобы не флудить Telegram
+            await asyncio.sleep(0.05)
         except Exception as e:
             failed += 1
-            logging.warning(f"Не удалось отправить {user_id}: {e}")
+            logging.warning(f"Не удалось отправить уведомление о рестарте {user_id}: {e}")
 
-    logging.info(f"Рассылка при рестарте: успешно {success}, не удалось {failed}")
+    logging.info(f"Рассылка при рестарте завершена: успешно {success}, ошибка {failed}")
 
     try:
         await bot.send_message(
             ADMIN_ID,
-            f"📬 <b>Рассылка при рестарте завершена</b>\n\n"
+            f"📬 <b>Рассылка об обновлении завершена</b>\n\n"
             f"✅ Доставлено: <b>{success}</b>\n"
             f"❌ Не доставлено: <b>{failed}</b>\n"
-            f"👥 Всего: <b>{len(users)}</b>"
+            f"👥 Всего пользователей в БД: <b>{len(users)}</b>"
         )
     except Exception:
         pass
@@ -169,39 +190,42 @@ def content_type_emoji(content_type: str) -> str:
     }
     return mapping.get(content_type, "📁")
 
-async def send_media_alert(bot: Bot, target_id: int, text: str, file_id: str, content_type: str, caption: str):
+async def send_media_alert(bot: Bot, target_id: int, file_id: str, content_type: str, caption: str):
+    """
+    Отправляет 1 сообщение (медиа + текст). 
+    Если медиа не поддерживает подпись (кружочки, стикеры), отправляет текст, затем само медиа.
+    """
     try:
+        # Лимит подписи в Telegram - 1024 символа
+        safe_caption = caption if len(caption) <= 1024 else caption[:1020] + "..."
+
         if file_id:
-            if content_type == 'photo':      await bot.send_photo(target_id, file_id, caption=caption)
-            elif content_type == 'video':    await bot.send_video(target_id, file_id, caption=caption)
-            elif content_type == 'voice':    await bot.send_voice(target_id, file_id, caption=caption)
+            if content_type == 'photo':      await bot.send_photo(target_id, file_id, caption=safe_caption)
+            elif content_type == 'video':    await bot.send_video(target_id, file_id, caption=safe_caption)
+            elif content_type == 'voice':    await bot.send_voice(target_id, file_id, caption=safe_caption)
+            elif content_type == 'document': await bot.send_document(target_id, file_id, caption=safe_caption)
+            elif content_type == 'animation': await bot.send_animation(target_id, file_id, caption=safe_caption)
+            elif content_type == 'audio':    await bot.send_audio(target_id, file_id, caption=safe_caption)
             elif content_type == 'video_note':
                 await bot.send_message(target_id, caption)
                 await bot.send_video_note(target_id, file_id)
-            elif content_type == 'document': await bot.send_document(target_id, file_id, caption=caption)
             elif content_type == 'sticker':
                 await bot.send_message(target_id, caption)
                 await bot.send_sticker(target_id, file_id)
-            elif content_type == 'animation': await bot.send_animation(target_id, file_id, caption=caption)
-            elif content_type == 'audio':    await bot.send_audio(target_id, file_id, caption=caption)
-            else: await bot.send_message(target_id, f"{caption}\n\n[Медиафайл: {content_type}]")
+            else:
+                await bot.send_message(target_id, f"{caption}\n\n[Неизвестный медиафайл: {content_type}]")
         else:
             await bot.send_message(target_id, caption)
     except Exception as e:
-        logging.error(f"Ошибка отправки: {e}")
-        await bot.send_message(target_id, f"{caption}\n\n⚠️ <i>[Файл удалён с серверов Telegram]</i>")
+        logging.error(f"Ошибка отправки медиа: {e}")
+        await bot.send_message(target_id, f"{caption}\n\n⚠️ <i>[Не удалось загрузить файл или он удален с серверов Telegram]</i>")
 
 
 # ================= ОБРАБОТЧИКИ ОБЫЧНЫХ СООБЩЕНИЙ =================
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
-    # Сохраняем пользователя для будущих рассылок
-    await save_user(
-        message.from_user.id,
-        message.from_user.username or "",
-        message.from_user.full_name or ""
-    )
+    await save_user(message.from_user.id, message.from_user.username or "", message.from_user.full_name or "")
     is_subbed = await check_subscription(bot, message.from_user.id)
 
     if not is_subbed:
@@ -217,34 +241,32 @@ async def cmd_start(message: Message, bot: Bot):
         return
 
     welcome_text = (
-        "👋 <b>Привет! Я слежу за твоими диалогами.</b>\n\n"
-        "Я буду присылать тебе сюда <b>удалённые и изменённые</b> сообщения из твоих чатов — включая фото, голосовые, кружочки, стикеры, гифки и видео.\n\n"
+        "👋 <b>Привет! Я бот, который спалит всё, что тебе пишут и удаляют.</b>\n\n"
+        "Я умею сохранять <b>текст, голосовые, фото, видео, кружочки, стикеры и гифки</b>.\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚙️ <b>КАК ПОДКЛЮЧИТЬ БОТА:</b>\n\n"
-        "1️⃣ Открой <b>Telegram → Настройки</b>\n"
-        "2️⃣ Зайди в <b>«Telegram для бизнеса»</b>\n"
-        "3️⃣ Нажми <b>«Чат-боты»</b>\n"
+        "🔥 <b>ИНСТРУКЦИЯ ПО ПОДКЛЮЧЕНИЮ:</b>\n\n"
+        "<i>(Нужна подписка Telegram Premium)</i>\n"
+        "1️⃣ Зайди в настройки Telegram\n"
+        "2️⃣ Выбери <b>«Telegram для бизнеса»</b>\n"
+        "3️⃣ Пролистай вниз до <b>«Чат-боты»</b>\n"
         f"4️⃣ В поле ввода напиши <code>{BOT_USERNAME}</code> и нажми <b>«Добавить»</b>\n"
-        "5️⃣ Поставь галочку <b>«Все личные чаты»</b> и сохрани\n\n"
-        "✅ Готово! Бот начнёт работать сразу.\n\n"
+        "5️⃣ Обязательно выбери <b>«Все личные чаты»</b> (кроме избранного) и нажми сохранить!\n\n"
+        "✅ <b>Всё! Как только ты это сделаешь, я напишу тебе, что всё заработало.</b>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔄 <b>ЕСЛИ БОТ НЕ РАБОТАЕТ / ОБНОВИЛСЯ:</b>\n\n"
-        "1️⃣ Зайди в <b>Настройки → Telegram для бизнеса → Чат-боты</b>\n"
-        f"2️⃣ Удали <code>{BOT_USERNAME}</code> из списка\n"
-        "3️⃣ Подожди 5 секунд\n"
-        f"4️⃣ Снова добавь <code>{BOT_USERNAME}</code>\n"
-        "5️⃣ Напиши мне /start ещё раз\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚠️ <b>ВАЖНО:</b> Бот видит только те сообщения, которые пришли <b>после</b> подключения. "
-        "Старые сообщения не сохраняются.\n\n"
-        "❓ Если что-то не работает — просто переподключи бота по инструкции выше."
+        "🔄 <b>ЕСЛИ БОТ ПЕРЕСТАЛ РАБОТАТЬ ИЛИ ВЫШЛО ОБНОВЛЕНИЕ:</b>\n"
+        f"Просто удали <code>{BOT_USERNAME}</code> из списка бизнес-ботов, подожди 5 секунд и добавь заново! Это решит 99% проблем.\n\n"
+        "⚠️ <i>Помни: я вижу сообщения только ПОСЛЕ подключения. Старые сообщения достать невозможно.</i>"
     )
 
     if message.from_user.id == ADMIN_ID:
-        welcome_text += "\n\n🛠 <b>Команды Админа:</b>\n📊 /stats — статистика"
+        welcome_text += (
+            "\n\n🛠 <b>Команды Админа:</b>\n"
+            "📊 /stats — расширенная статистика (для рекламодателей)\n"
+            "📢 /sendall [текст] — рассылка ВСЕМ юзерам в базе\n"
+            "🔥 /sendactive [текст] — рассылка ТОЛЬКО юзерам с подключенным ботом"
+        )
 
     await message.answer(welcome_text)
 
@@ -253,53 +275,147 @@ async def cmd_start(message: Message, bot: Bot):
 async def cmd_stats(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
+    
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT COUNT(*) FROM messages_v2") as cursor:
-            total_msgs = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM messages_v2 WHERE file_id IS NOT NULL") as cursor:
-            media_msgs = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(DISTINCT user_id) FROM business_connections") as cursor:
+        # Аудитория
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
             total_users = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COUNT(DISTINCT user_id) FROM business_connections") as cursor:
+            active_connections = (await cursor.fetchone())[0]
+            
+        # Глобальные счетчики перехватов
+        async with db.execute("SELECT stat_value FROM bot_stats WHERE stat_name = 'deleted_caught'") as cursor:
+            row = await cursor.fetchone()
+            deleted_caught = row[0] if row else 0
+        async with db.execute("SELECT stat_value FROM bot_stats WHERE stat_name = 'edited_caught'") as cursor:
+            row = await cursor.fetchone()
+            edited_caught = row[0] if row else 0
 
-    await message.answer(
-        f"🗄 <b>СТАТИСТИКА:</b>\n\n"
-        f"👤 Пользователей: <b>{total_users}</b>\n"
-        f"💬 Всего сообщений в БД: <b>{total_msgs}</b>\n"
-        f"├ 📝 Текстовых: <b>{total_msgs - media_msgs}</b>\n"
-        f"└ 📸 С медиа: <b>{media_msgs}</b>"
+    # Вычисление аптайма
+    delta = datetime.now() - BOT_START_TIME
+    days = delta.days
+    hours, rem = divmod(delta.seconds, 3600)
+    minutes, _ = divmod(rem, 60)
+    uptime_str = f"{days}д {hours}ч {minutes}м"
+
+    stats_text = (
+        "📈 <b>СТАТИСТИКА БОТА (ПРЕЗЕНТАЦИЯ)</b> 📈\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "👥 <b>АУДИТОРИЯ:</b>\n"
+        f"├ Всего запусков бота: <b>{total_users}</b>\n"
+        f"└ Активных Premium-пользователей: <b>{active_connections}</b>\n"
+        "<i>(Люди, которые прямо сейчас используют перехватчик)</i>\n\n"
+        "🔥 <b>ЭФФЕКТИВНОСТЬ (ПОЧЕМУ МЫ ИМБА):</b>\n"
+        f"├ 🗑 Перехвачено удалённых: <b>{deleted_caught}</b>\n"
+        f"├ ✏️ Перехвачено изменённых: <b>{edited_caught}</b>\n"
+        "└ 📸 <i>Считываем абсолютно всё: тексты, фото, видео, кружочки, голосовые, стикеры и гифки!</i>\n\n"
+        f"⏳ <b>Аптайм бота:</b> {uptime_str}\n\n"
+        "💡 <b>Для рекламодателей:</b>\n"
+        "Наша аудитория — это исключительно <b>Telegram Premium</b> юзеры. "
+        "Это самая активная, вовлеченная и платежеспособная прослойка пользователей Telegram, "
+        "которая ценит функционал и контроль над своими переписками."
     )
+
+    await message.answer(stats_text)
+
+
+@router.message(Command("sendall"))
+async def cmd_sendall(message: Message, bot: Bot):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    text = message.html_text.replace("/sendall", "").strip()
+    if not text:
+        await message.answer("⚠️ Использование: `/sendall Ваш текст`", parse_mode="Markdown")
+        return
+
+    await message.answer("⏳ Начинаю рассылку по ВСЕМ пользователям...")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT user_id FROM users") as cursor:
+            users = await cursor.fetchall()
+
+    success, failed = 0, 0
+    for (user_id,) in users:
+        try:
+            await bot.send_message(user_id, text)
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+
+    await message.answer(f"✅ <b>Рассылка завершена!</b>\n\nУспешно: {success}\nОшибка: {failed}")
+
+
+@router.message(Command("sendactive"))
+async def cmd_sendactive(message: Message, bot: Bot):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    text = message.html_text.replace("/sendactive", "").strip()
+    if not text:
+        await message.answer("⚠️ Использование: `/sendactive Ваш текст`", parse_mode="Markdown")
+        return
+
+    await message.answer("⏳ Начинаю рассылку ТОЛЬКО по Premium-пользователям...")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT DISTINCT user_id FROM business_connections") as cursor:
+            users = await cursor.fetchall()
+
+    success, failed = 0, 0
+    for (user_id,) in users:
+        try:
+            await bot.send_message(user_id, text)
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+
+    await message.answer(f"✅ <b>Рассылка по активным завершена!</b>\n\nУспешно: {success}\nОшибка: {failed}")
 
 
 # ================= ОБРАБОТЧИКИ БИЗНЕС-СООБЩЕНИЙ =================
 
 @router.business_connection()
 async def on_business_connection(connection: BusinessConnection, bot: Bot):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO business_connections (connection_id, user_id) VALUES (?, ?)",
-            (connection.id, connection.user.id)
-        )
-        await db.commit()
+    await save_user(connection.user.id, connection.user.username or "", connection.user.full_name or "")
 
-    # Сохраняем пользователя для рассылок
-    await save_user(
-        connection.user.id,
-        connection.user.username or "",
-        connection.user.full_name or ""
-    )
+    if connection.is_enabled:
+        # Пользователь ПОДКЛЮЧИЛ бота
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO business_connections (connection_id, user_id) VALUES (?, ?)",
+                (connection.id, connection.user.id)
+            )
+            await db.commit()
 
-    # Уведомляем пользователя что бот успешно подключён
-    try:
-        await bot.send_message(
-            connection.user.id,
-            "✅ <b>Бот успешно подключён к твоему аккаунту!</b>\n\n"
-            "Теперь я буду перехватывать удалённые и изменённые сообщения из твоих чатов.\n\n"
-            "Напиши /start чтобы увидеть полную инструкцию."
-        )
-    except Exception as e:
-        logging.error(f"Не удалось отправить приветствие после подключения: {e}")
+        try:
+            await bot.send_message(
+                connection.user.id,
+                "✅ <b>УСПЕШНО! Бот подключён к твоему аккаунту.</b>\n\n"
+                "Теперь я работаю как шпион 🥷\n"
+                "Если кто-то удалит или изменит сообщение, фото, голосовое, кружок или стикер — я сразу пришлю его тебе сюда.\n\n"
+                "<i>Чтобы посмотреть настройки, напиши /start</i>"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить приветствие: {e}")
 
-    logging.info(f"Бизнес-подключение: {connection.id} от {connection.user.id}")
+    else:
+        # Пользователь ОТКЛЮЧИЛ бота
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("DELETE FROM business_connections WHERE connection_id = ?", (connection.id,))
+            await db.commit()
+
+        try:
+            await bot.send_message(
+                connection.user.id,
+                "❌ <b>Ты отключил меня от бизнес-аккаунта.</b>\n\n"
+                "Окей, окей... Я удалил доступ и больше не слежу за твоими чатами. Удаленные сообщения больше приходить не будут.\n\n"
+                "🔁 Если передумаешь и захочешь вернуть ИМБА-функции — просто добавь меня заново в <b>Настройки → Telegram для бизнеса → Чат-боты</b>!"
+            )
+        except Exception as e:
+            logging.error(f"Не удалось отправить сообщение об отключении: {e}")
 
 
 @router.business_message()
@@ -340,7 +456,7 @@ async def on_edited_business_message(message: Message, bot: Bot):
         ) as cursor:
             row = await cursor.fetchone()
 
-        old_text = row[0] if row else "[не было в базе]"
+        old_text = row[0] if row else "[Текст не был сохранен]"
         old_file_id = row[1] if row else None
         old_content_type = row[2] if row else "text"
 
@@ -350,40 +466,47 @@ async def on_edited_business_message(message: Message, bot: Bot):
         )
         await db.commit()
 
+    # Увеличиваем счетчик измененных сообщений
+    await inc_stat("edited_caught")
+
     safe_old = html.escape(old_text) if old_text else ""
     safe_new = html.escape(new_text) if new_text else ""
+
+    # Если текста слишком много, обрезаем, чтобы не словить ошибку Telegram (Caption too long)
+    if len(safe_old) > 400: safe_old = safe_old[:400] + "..."
+    if len(safe_new) > 400: safe_new = safe_new[:400] + "..."
+
     old_emoji = content_type_emoji(old_content_type)
     new_emoji = content_type_emoji(new_content_type)
 
-    # Одно сообщение с обеими версиями
+    # Формируем ОДНО сообщение
     caption = f"✏️ <b>{author_str} ИЗМЕНИЛ(А) СООБЩЕНИЕ:</b>\n\n"
 
     caption += f"<b>Было {old_emoji}:</b>\n"
     if safe_old:
         caption += f"<blockquote>{safe_old}</blockquote>\n"
     elif old_file_id:
-        caption += f"<i>[{old_content_type}]</i>\n"
+        caption += f"<i>[Медиа: {old_content_type}]</i>\n"
     else:
-        caption += "<i>[пусто]</i>\n"
+        caption += "<i>[Пустое сообщение]</i>\n"
 
     caption += f"\n<b>Стало {new_emoji}:</b>\n"
     if safe_new:
         caption += f"<blockquote>{safe_new}</blockquote>\n"
     elif new_file_id:
-        caption += f"<i>[{new_content_type}]</i>\n"
+        caption += f"<i>[Медиа: {new_content_type}]</i>\n"
     else:
-        caption += "<i>[пусто]</i>\n"
+        caption += "<i>[Пустое сообщение]</i>\n"
 
     caption += f"\n{BOT_USERNAME}"
 
-    # Если новая версия содержит медиа — отправляем с ним
-    # Если нет — пробуем со старым медиа
+    # Отправляем 1 итоговое сообщение
     if new_file_id:
-        await send_media_alert(bot, owner_id, safe_new, new_file_id, new_content_type, caption)
+        await send_media_alert(bot, owner_id, new_file_id, new_content_type, caption)
     elif old_file_id:
-        await send_media_alert(bot, owner_id, safe_old, old_file_id, old_content_type, caption)
+        await send_media_alert(bot, owner_id, old_file_id, old_content_type, caption)
     else:
-        await bot.send_message(owner_id, caption)
+        await send_media_alert(bot, owner_id, None, "text", caption)
 
 
 @router.deleted_business_messages()
@@ -413,10 +536,13 @@ async def on_deleted_business_messages(deleted: BusinessMessagesDeleted, bot: Bo
                 if safe_text:
                     caption += f"{emoji} <blockquote>{safe_text}</blockquote>\n\n"
                 elif file_id:
-                    caption += f"{emoji} <i>[{content_type}]</i>\n\n"
+                    caption += f"{emoji} <i>[Удален файл: {content_type}]</i>\n\n"
                 caption += f"{BOT_USERNAME}"
 
-                await send_media_alert(bot, owner_id, safe_text, file_id, content_type, caption)
+                await send_media_alert(bot, owner_id, file_id, content_type, caption)
+                
+                # Увеличиваем счетчик удаленных
+                await inc_stat("deleted_caught")
 
                 await db.execute(
                     "DELETE FROM messages_v2 WHERE connection_id = ? AND chat_id = ? AND message_id = ?",
@@ -451,7 +577,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Запускаем поллинг...")
 
-    # Рассылка всем пользователям о рестарте
+    # Рассылка всем пользователям об обновлении (рестарте)
     await broadcast_restart(bot)
 
     try:
