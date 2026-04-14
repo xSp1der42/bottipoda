@@ -14,12 +14,24 @@ from aiogram.filters import CommandStart, Command
 
 # ================= НАСТРОЙКИ =================
 
-BOT_TOKEN = "8099587334:AAH_QvFyc_8d1Y5_5_D3r9lXoyL3L7hNLFE"
+BOT_TOKEN = "8099587334:AAHsx8L1LWlppUMjuZ6ZrwLL4BnKHkz4_ZU"
 ADMIN_ID = 5153531676
 DB_NAME = "business_messages.db"
 BOT_USERNAME = "@nodelchat_bot"
 
 CHANNELS = ["@xSp1der42", "@neon9_news"]
+
+# Текст рассылки при рестарте. Если не нужна рассылка — поставь пустую строку ""
+RESTART_NOTIFY_TEXT = (
+    "🔄 <b>Бот был обновлён!</b>\n\n"
+    "Чтобы всё продолжало работать — переподключи бота:\n\n"
+    "1️⃣ Зайди в <b>Настройки → Telegram для бизнеса → Чат-боты</b>\n"
+    f"2️⃣ Удали <code>@nodelchat_bot</code> из списка\n"
+    "3️⃣ Подожди 5 секунд\n"
+    f"4️⃣ Снова добавь <code>@nodelchat_bot</code>\n"
+    "5️⃣ Напиши мне /start\n\n"
+    "❓ Если уже подключён и всё работает — можешь проигнорировать это сообщение."
+)
 
 # =============================================
 
@@ -48,11 +60,65 @@ async def init_db():
                 user_id INTEGER
             )
         """)
+        # Таблица всех пользователей которые писали боту — для рассылки при рестарте
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                first_seen INTEGER
+            )
+        """)
         await db.commit()
     logging.info("База данных инициализирована.")
 
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+
+async def save_user(user_id: int, username: str = "", full_name: str = ""):
+    """Сохраняет пользователя в БД (если уже есть — игнорирует)"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, full_name, first_seen) VALUES (?, ?, ?, ?)",
+            (user_id, username or "", full_name or "", int(asyncio.get_event_loop().time()))
+        )
+        await db.commit()
+
+async def broadcast_restart(bot: Bot):
+    """Рассылает уведомление о рестарте всем пользователям из БД"""
+    if not RESTART_NOTIFY_TEXT:
+        return
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT user_id FROM users") as cursor:
+            users = await cursor.fetchall()
+
+    if not users:
+        logging.info("Нет пользователей для рассылки.")
+        return
+
+    success, failed = 0, 0
+    for (user_id,) in users:
+        try:
+            await bot.send_message(user_id, RESTART_NOTIFY_TEXT)
+            success += 1
+            await asyncio.sleep(0.05)  # небольшая задержка чтобы не флудить Telegram
+        except Exception as e:
+            failed += 1
+            logging.warning(f"Не удалось отправить {user_id}: {e}")
+
+    logging.info(f"Рассылка при рестарте: успешно {success}, не удалось {failed}")
+
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"📬 <b>Рассылка при рестарте завершена</b>\n\n"
+            f"✅ Доставлено: <b>{success}</b>\n"
+            f"❌ Не доставлено: <b>{failed}</b>\n"
+            f"👥 Всего: <b>{len(users)}</b>"
+        )
+    except Exception:
+        pass
 
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     if user_id == ADMIN_ID:
@@ -130,6 +196,12 @@ async def send_media_alert(bot: Bot, target_id: int, text: str, file_id: str, co
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, bot: Bot):
+    # Сохраняем пользователя для будущих рассылок
+    await save_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.full_name or ""
+    )
     is_subbed = await check_subscription(bot, message.from_user.id)
 
     if not is_subbed:
@@ -208,6 +280,13 @@ async def on_business_connection(connection: BusinessConnection, bot: Bot):
             (connection.id, connection.user.id)
         )
         await db.commit()
+
+    # Сохраняем пользователя для рассылок
+    await save_user(
+        connection.user.id,
+        connection.user.username or "",
+        connection.user.full_name or ""
+    )
 
     # Уведомляем пользователя что бот успешно подключён
     try:
@@ -371,6 +450,9 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     logging.info("Запускаем поллинг...")
+
+    # Рассылка всем пользователям о рестарте
+    await broadcast_restart(bot)
 
     try:
         await dp.start_polling(bot, allowed_updates=[
